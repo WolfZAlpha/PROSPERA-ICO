@@ -8,33 +8,84 @@ import { useEtherBalance, useEthers } from '@usedapp/core';
 import { ethers } from 'ethers';
 import ParbAbi from "./pros_abi.json";
 
+// Provider and contract setup
+const provider = new ethers.providers.JsonRpcProvider('https://arbitrum-one-rpc.publicnode.com');
 const presaleContractAddress = "0x1806CD54631309778dE011A3ceeE6F88CA9c8DAf";
 
+// Custom hook to fetch ICO data
 const useIcoData = () => {
-  const { account, library } = useEthers();
+  const { account } = useEthers();
   const [icoData, setIcoData] = useState({
-    currentTier: "Tier1",
+    isActive: false,
+    currentTier: "Inactive",
     tokensSold: 0,
-    tokensAvailable: 0,
+    totalSupply: 0,
     tokenPrice: 0,
+    minBuy: 0,
+    maxBuy: 0,
   });
 
   useEffect(() => {
-    if (!account || !library) return;
+    if (!account) return;
 
-    const contract = new ethers.Contract(presaleContractAddress, ParbAbi, library);
+    const contract = new ethers.Contract(presaleContractAddress, ParbAbi, provider);
     const fetchIcoData = async () => {
       try {
-        const currentTier = await contract.getCurrentTier();
-        const tokensSold = await contract.getTokensSold();
-        const tokensAvailable = await contract.getTokensAvailable();
-        const tokenPrice = await contract.getTokenPrice();
+        console.log('Fetching ICO data...');
+        console.log('Contract:', contract);
+
+        const icoState = await contract.getIcoState();
+        const isActive = icoState._icoActive;
+
+        // Fetch tokens and prices in BigNumber format
+        const tier1TokensBN = await contract.TIER1_TOKENS();
+        const tier2TokensBN = await contract.TIER2_TOKENS();
+        const tier3TokensBN = await contract.TIER3_TOKENS();
+        const tier1PriceUSDBN = await contract.TIER1_PRICE_USD();
+        const tier2PriceUSDBN = await contract.TIER2_PRICE_USD();
+        const tier3PriceUSDBN = await contract.TIER3_PRICE_USD();
+        const ethUsdPriceBN = await contract.getEthUsdPrice();
+
+        // Convert ETH/USD price to a regular number
+        const ethUsdPrice = parseFloat(ethers.utils.formatUnits(ethUsdPriceBN, 18));
+
+        // Token prices in USD
+        const tier1PriceUsd = parseFloat(tier1PriceUSDBN.toString()) / 100;
+        const tier2PriceUsd = parseFloat(tier2PriceUSDBN.toString()) / 100;
+        const tier3PriceUsd = parseFloat(tier3PriceUSDBN.toString()) / 100;
+
+        const currentTier = icoState._currentTier;
+        let tokensSold, totalSupply, tokenPrice;
+
+        if (currentTier === 0) {
+          tokensSold = ethers.utils.formatUnits(icoState._tier1Sold, 0);
+          totalSupply = ethers.utils.formatUnits(tier1TokensBN, 0);
+          tokenPrice = tier1PriceUsd;
+        } else if (currentTier === 1) {
+          tokensSold = ethers.utils.formatUnits(icoState._tier2Sold, 0);
+          totalSupply = ethers.utils.formatUnits(tier2TokensBN, 0);
+          tokenPrice = tier2PriceUsd;
+        } else if (currentTier === 2) {
+          tokensSold = ethers.utils.formatUnits(icoState._tier3Sold, 0);
+          totalSupply = ethers.utils.formatUnits(tier3TokensBN, 0);
+          tokenPrice = tier3PriceUsd;
+        }
+
+        const tierLabels = ["Tier 1", "Tier 2", "Tier 3"];
+        const tierLabel = tierLabels[currentTier] || "Inactive";
+
+        // Set static values for minBuy and maxBuy in USD
+        const minBuyUsd = 150;
+        const maxBuyUsd = 500000;
 
         setIcoData({
-          currentTier: `Tier${currentTier + 1}`,
-          tokensSold: ethers.utils.formatUnits(tokensSold, 18),
-          tokensAvailable: ethers.utils.formatUnits(tokensAvailable, 18),
-          tokenPrice: ethers.utils.formatUnits(tokenPrice, "ether"),
+          isActive,
+          currentTier: tierLabel,
+          tokensSold: parseInt(tokensSold),
+          totalSupply: parseInt(totalSupply),
+          tokenPrice: parseFloat(tokenPrice).toFixed(2), // USD format with 2 decimals
+          minBuy: minBuyUsd,
+          maxBuy: maxBuyUsd,
         });
       } catch (error) {
         console.error('Error fetching ICO data:', error);
@@ -42,14 +93,13 @@ const useIcoData = () => {
     };
 
     fetchIcoData();
-  }, [account, library]);
+  }, [account]);
 
-  return icoData;
+  return { icoData };
 };
 
-
 const ProgressBar = ({ current, goal }) => {
-  const progress = (current / goal) * 100;
+  const progress = goal > 0 ? (current / goal) * 100 : 0;
 
   return (
     <Box sx={{ width: '100%', position: 'relative', bgcolor: 'black', border: '2px solid #01ff02', mt: 5 }}
@@ -100,17 +150,30 @@ const ProgressBar = ({ current, goal }) => {
 
 function App() {
   const { account, library } = useEthers();
-  const etherBalance = useEtherBalance(account);
   const icoData = useIcoData();
-
   const [amount, setAmount] = useState(0.0);
-  const [status, setStatus] = useState('ACTIVE');
-  const [saleType, setSaleType] = useState('PUBLIC');
   const [minBuy, setMinBuy] = useState('1 $PROS');
   const [maxBuy, setMaxBuy] = useState('20m $PROS');
   const [walletInfo, setWalletInfo] = useState(null);
   const [openSnackbar, setOpenSnackbar] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+
+  useEffect(() => {
+    const fetchBuyLimits = async () => {
+      try {
+        const contract = new ethers.Contract(presaleContractAddress, ParbAbi, provider);
+        const minBuy = await contract.getMinIcoBuy();
+        const maxBuy = await contract.getMaxIcoBuy();
+
+        setMinBuy(ethers.utils.formatUnits(minBuy, 18));
+        setMaxBuy(ethers.utils.formatUnits(maxBuy, 18));
+      } catch (error) {
+        console.error('Error fetching buy limits:', error);
+      }
+    };
+
+    fetchBuyLimits();
+  }, []);
 
   const Alert = forwardRef(function Alert(props, ref) {
     return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
@@ -134,46 +197,51 @@ function App() {
     }
   };
 
-  const handleMaxAmount = async () => {
-    if (!account || !library) {
+  const handleMaxAmount = () => {
+    if (!account) {
       handleError("Please connect your wallet to fetch available amount.");
       return;
     }
   
     try {
-      const signer = library.getSigner(account);
-      const contract = new ethers.Contract(presaleContractAddress, ParbAbi, signer);
-      const availablePros = await contract.singleAddressCheckProsAmountAvailable();
-      const formattedAvailablePros = ethers.utils.formatUnits(availablePros, 18);
-      setAmount(formattedAvailablePros);
+      const maxTokens = Math.floor(parseFloat(icoData.icoData.maxBuy) / parseFloat(icoData.icoData.tokenPrice)); // Convert USD max buy to token quantity and ensure it's a whole number
+      setAmount(maxTokens.toString()); // Set amount as a whole number string
     } catch (error) {
-      handleError("Failed to fetch available amount.");
+      console.error("Error setting max amount:", error);
+      handleError("Failed to set max amount.");
     }
-  };
-  
+  };  
+
   const handleBuy = async () => {
     if (!account) {
       handleError("Please connect your wallet to purchase tokens.");
       return;
     }
-  
+
+    const minIcoBuyInEth = await contract.getMinIcoBuy();
+    const tokenAmount = ethers.utils.parseUnits(amount.toString(), 18);
+
+    if (tokenAmount.lt(minIcoBuyInEth)) {
+      handleError(`You must buy at least ${ethers.utils.formatUnits(minIcoBuyInEth, 18)} $PROS tokens.`);
+      return;
+    }
+
     try {
       const signer = library.getSigner(account);
       const contract = new ethers.Contract(presaleContractAddress, ParbAbi, signer);
-      const tokenAmount = ethers.utils.parseUnits(amount.toString(), 18);
       const cost = tokenAmount.mul(ethers.utils.parseUnits(icoData.tokenPrice, "ether")).div(ethers.utils.parseUnits("1", 18));
-  
+
       const transaction = await contract.buyTokens(tokenAmount, {
         value: cost
       });
-  
+
       await transaction.wait();
       console.log("Tokens purchased successfully!");
     } catch (error) {
+      console.error("Error during token purchase:", error);
       handleError("Failed to purchase tokens.");
     }
   };
-  
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -188,8 +256,14 @@ function App() {
           <div className="relative self-center mt-14 text-2xl font-semibold leading-10 text-center text-pros-green uppercase max-md:mt-10 max-md:max-w-full">
             PRESALE ACTIVE NOW!
           </div>
+
+          {/* Current Tier */}
+          <div className="mt-10">
+            <div className="text-2xl font-semibold text-center text-pros-green">{icoData.icoData.currentTier}</div>
+          </div>
+  
           <div className="md:mt-7 w-full">
-            <ProgressBar current={icoData.tokensSold} goal={icoData.tokensAvailable} />
+            <ProgressBar current={icoData.icoData.tokensSold} goal={icoData.icoData.totalSupply} />
           </div>
 
           {/* Dual Subsection */}
@@ -199,19 +273,19 @@ function App() {
               <div className="mt-4 space-y-2">
                 <div className="flex justify-between text-xl">
                   <span>Status:</span>
-                  <span>{status}</span>
+                  <span>{icoData.icoData.isActive ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="flex justify-between text-xl">
-                  <span>Sale Type:</span>
-                  <span>{saleType}</span>
+                  <span>Price (USD/ETH):</span>
+                  <span>{`$${icoData.icoData.tokenPrice}`}</span>
                 </div>
                 <div className="flex justify-between text-xl">
-                  <span>Min Buy:</span>
-                  <span>{minBuy}</span>
+                  <span>Min Buy (USD/ETH):</span>
+                  <span>{`$${icoData.icoData.minBuy}`}</span>
                 </div>
                 <div className="flex justify-between text-xl">
-                  <span>Max Buy:</span>
-                  <span>{maxBuy}</span>
+                  <span>Max Buy (USD/ETH):</span>
+                  <span>{`$${icoData.icoData.maxBuy}`}</span>
                 </div>
               </div>
             </div>
