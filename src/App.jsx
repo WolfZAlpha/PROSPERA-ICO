@@ -1,4 +1,4 @@
-import { useState, useEffect, forwardRef } from "react";
+import { useState, useEffect, useCallback, forwardRef } from "react";
 import './App.css';
 import Header from "./components/Header.jsx";
 import Footer from "./components/Footer.jsx";
@@ -12,9 +12,10 @@ import ParbAbi from "./pros_abi.json";
 const provider = new ethers.providers.JsonRpcProvider('https://arbitrum-one-rpc.publicnode.com');
 const presaleContractAddress = "0x1806CD54631309778dE011A3ceeE6F88CA9c8DAf";
 
-// Custom hook to fetch ICO data
+// Custom hook to fetch ICO data and provide buy functionality
+// useIcoData Hook
 const useIcoData = () => {
-  const { account } = useEthers();
+  const { account, library } = useEthers();
   const [icoData, setIcoData] = useState({
     isActive: false,
     currentTier: "Inactive",
@@ -24,20 +25,20 @@ const useIcoData = () => {
     minBuy: 0,
     maxBuy: 0,
   });
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (!account) return;
+    if (!account) {
+      setIsLoading(false);
+      return;
+    }
 
     const contract = new ethers.Contract(presaleContractAddress, ParbAbi, provider);
     const fetchIcoData = async () => {
       try {
-        console.log('Fetching ICO data...');
-        console.log('Contract:', contract);
-
         const icoState = await contract.getIcoState();
         const isActive = icoState._icoActive;
 
-        // Fetch tokens and prices in BigNumber format
         const tier1TokensBN = await contract.TIER1_TOKENS();
         const tier2TokensBN = await contract.TIER2_TOKENS();
         const tier3TokensBN = await contract.TIER3_TOKENS();
@@ -46,10 +47,8 @@ const useIcoData = () => {
         const tier3PriceUSDBN = await contract.TIER3_PRICE_USD();
         const ethUsdPriceBN = await contract.getEthUsdPrice();
 
-        // Convert ETH/USD price to a regular number
         const ethUsdPrice = parseFloat(ethers.utils.formatUnits(ethUsdPriceBN, 18));
 
-        // Token prices in USD
         const tier1PriceUsd = parseFloat(tier1PriceUSDBN.toString()) / 100;
         const tier2PriceUsd = parseFloat(tier2PriceUSDBN.toString()) / 100;
         const tier3PriceUsd = parseFloat(tier3PriceUSDBN.toString()) / 100;
@@ -74,7 +73,6 @@ const useIcoData = () => {
         const tierLabels = ["Tier 1", "Tier 2", "Tier 3"];
         const tierLabel = tierLabels[currentTier] || "Inactive";
 
-        // Set static values for minBuy and maxBuy in USD
         const minBuyUsd = 150;
         const maxBuyUsd = 500000;
 
@@ -83,19 +81,45 @@ const useIcoData = () => {
           currentTier: tierLabel,
           tokensSold: parseInt(tokensSold),
           totalSupply: parseInt(totalSupply),
-          tokenPrice: parseFloat(tokenPrice).toFixed(2), // USD format with 2 decimals
+          tokenPrice: parseFloat(tokenPrice).toFixed(2),
           minBuy: minBuyUsd,
           maxBuy: maxBuyUsd,
         });
       } catch (error) {
         console.error('Error fetching ICO data:', error);
+      } finally {
+        setIsLoading(false);
       }
     };
 
     fetchIcoData();
   }, [account]);
 
-  return { icoData };
+  const buyTokens = useCallback(async (tokenAmount) => {
+    if (!account || !library) {
+      throw new Error('Please connect your wallet to purchase tokens.');
+    }
+
+    const signer = library.getSigner();
+    const contract = new ethers.Contract(presaleContractAddress, ParbAbi, signer);
+
+    const tokenPrice = ethers.utils.parseUnits(icoData.tokenPrice.toString(), "ether");
+    const ethAmount = ethers.BigNumber.from(tokenAmount).mul(tokenPrice).div(ethers.constants.WeiPerEther);
+
+    try {
+      const tx = await contract.buyTokens(tokenAmount, {
+        value: ethAmount
+      });
+
+      await tx.wait();
+      console.log("Tokens purchased successfully!");
+    } catch (error) {
+      console.error("Error during token purchase:", error);
+      throw new Error("Failed to purchase tokens.");
+    }
+  }, [account, library, icoData.tokenPrice]);
+
+  return { icoData, isLoading, buyTokens };
 };
 
 const ProgressBar = ({ current, goal }) => {
@@ -149,14 +173,14 @@ const ProgressBar = ({ current, goal }) => {
 };
 
 function App() {
-  const { account, library } = useEthers();
-  const icoData = useIcoData();
+  const { account } = useEthers();
+  const { icoData, isLoading, buyTokens } = useIcoData();
   const [amount, setAmount] = useState(0.0);
   const [minBuy, setMinBuy] = useState('1 $PROS');
   const [maxBuy, setMaxBuy] = useState('20m $PROS');
   const [walletInfo, setWalletInfo] = useState(null);
-  const [openSnackbar, setOpenSnackbar] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [openSnackbar, setOpenSnackbar] = useState(false);
 
   useEffect(() => {
     const fetchBuyLimits = async () => {
@@ -178,6 +202,7 @@ function App() {
   const Alert = forwardRef(function Alert(props, ref) {
     return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
   });
+
   const handleError = (message) => {
     setErrorMessage(message);
     setOpenSnackbar(true);
@@ -202,46 +227,29 @@ function App() {
       handleError("Please connect your wallet to fetch available amount.");
       return;
     }
-  
+
     try {
-      const maxTokens = Math.floor(parseFloat(icoData.icoData.maxBuy) / parseFloat(icoData.icoData.tokenPrice)); // Convert USD max buy to token quantity and ensure it's a whole number
+      const maxTokens = Math.floor(parseFloat(icoData.maxBuy) / parseFloat(icoData.tokenPrice)); // Convert USD max buy to token quantity and ensure it's a whole number
       setAmount(maxTokens.toString()); // Set amount as a whole number string
     } catch (error) {
       console.error("Error setting max amount:", error);
       handleError("Failed to set max amount.");
     }
-  };  
+  };
 
   const handleBuy = async () => {
-    if (!account) {
-      handleError("Please connect your wallet to purchase tokens.");
-      return;
-    }
-
-    const minIcoBuyInEth = await contract.getMinIcoBuy();
-    const tokenAmount = ethers.utils.parseUnits(amount.toString(), 18);
-
-    if (tokenAmount.lt(minIcoBuyInEth)) {
-      handleError(`You must buy at least ${ethers.utils.formatUnits(minIcoBuyInEth, 18)} $PROS tokens.`);
-      return;
-    }
-
     try {
-      const signer = library.getSigner(account);
-      const contract = new ethers.Contract(presaleContractAddress, ParbAbi, signer);
-      const cost = tokenAmount.mul(ethers.utils.parseUnits(icoData.tokenPrice, "ether")).div(ethers.utils.parseUnits("1", 18));
-
-      const transaction = await contract.buyTokens(tokenAmount, {
-        value: cost
-      });
-
-      await transaction.wait();
+      await buyTokens(amount);
       console.log("Tokens purchased successfully!");
     } catch (error) {
-      console.error("Error during token purchase:", error);
-      handleError("Failed to purchase tokens.");
+      console.error("Error during handleBuy:", error);
+      handleError("Failed to initiate token purchase.");
     }
   };
+
+  if (isLoading) {
+    return <div>Loading...</div>;
+  }
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -259,11 +267,11 @@ function App() {
 
           {/* Current Tier */}
           <div className="mt-10">
-            <div className="text-2xl font-semibold text-center text-pros-green">{icoData.icoData.currentTier}</div>
+            <div className="text-2xl font-semibold text-center text-pros-green">{icoData.currentTier}</div>
           </div>
-  
+
           <div className="md:mt-7 w-full">
-            <ProgressBar current={icoData.icoData.tokensSold} goal={icoData.icoData.totalSupply} />
+            <ProgressBar current={icoData.tokensSold} goal={icoData.totalSupply} />
           </div>
 
           {/* Dual Subsection */}
@@ -273,19 +281,19 @@ function App() {
               <div className="mt-4 space-y-2">
                 <div className="flex justify-between text-xl">
                   <span>Status:</span>
-                  <span>{icoData.icoData.isActive ? "Active" : "Inactive"}</span>
+                  <span>{icoData.isActive ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="flex justify-between text-xl">
                   <span>Price (USD/ETH):</span>
-                  <span>{`$${icoData.icoData.tokenPrice}`}</span>
+                  <span>{`$${icoData.tokenPrice}`}</span>
                 </div>
                 <div className="flex justify-between text-xl">
                   <span>Min Buy (USD/ETH):</span>
-                  <span>{`$${icoData.icoData.minBuy}`}</span>
+                  <span>{`$${icoData.minBuy}`}</span>
                 </div>
                 <div className="flex justify-between text-xl">
                   <span>Max Buy (USD/ETH):</span>
-                  <span>{`$${icoData.icoData.maxBuy}`}</span>
+                  <span>{`$${icoData.maxBuy}`}</span>
                 </div>
               </div>
             </div>
